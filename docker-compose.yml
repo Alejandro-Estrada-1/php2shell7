@@ -1,0 +1,133 @@
+services:
+  # ── A) Vulnerable: PHP 7.4.33, include() con input del usuario ──────────────
+  #    Publicado en 0.0.0.0 y con acceso a la "red interna".
+  #    docker compose up -d
+  php2shell7:
+    build: .
+    ports:
+      - "8083:80"
+    container_name: php2shell7-lab
+    networks: [frontend, internal-net]
+
+  # ── B) Firewall/exposición: misma app, publicada SOLO en loopback ─────────
+  #    Inaccesible desde la LAN (equivale a una regla "solo local/VPN").
+  app-private:
+    build: .
+    ports:
+      - "127.0.0.1:8090:80"
+    container_name: php2shell7-private
+    networks: [frontend]
+
+  # ── C) Detrás de un WAF: nginx + ModSecurity + OWASP CRS ───────────────────
+  #    http://localhost:8088 -> proxy -> php2shell7
+  waf:
+    image: owasp/modsecurity-crs:nginx
+    environment:
+      BACKEND: "http://php2shell7:80"
+      PORT: "8080"
+      SERVER_NAME: "lab.local"
+      MODSEC_RULE_ENGINE: "On"
+      PARANOIA: "1"
+    ports:
+      - "8088:8080"
+    depends_on: [php2shell7]
+    networks: [frontend]
+
+  # ── D) Código endurecido: allowlist + open_basedir + disable_functions ─────
+  #    http://localhost:8089 (el ataque debe morir aquí)
+  app-hardened:
+    build: .
+    volumes:
+      - ./app_hardened:/var/www/html:ro
+      - ./php_hardened.ini:/usr/local/etc/php/conf.d/zzz-hardened.ini:ro
+    ports:
+      - "8089:80"
+    container_name: php2shell7-hardened
+    networks: [frontend, internal-net]
+
+  # ── E) Vulnerable pero AISLADO: sin acceso a la red interna ────────────────
+  #    http://localhost:8091 (RCE sí, pivote no)
+  app-isolated:
+    build: .
+    ports:
+      - "8091:80"
+    container_name: php2shell7-isolated
+    networks: [frontend]
+
+  # Servicio "interno" al que un RCE intentaría pivotar (sin puerto publicado)
+  internal:
+    image: nginx:alpine
+    volumes:
+      - ./internal:/usr/share/nginx/html:ro
+    container_name: php2shell7-internal
+    networks: [internal-net]
+
+  # ── F) Defensa en profundidad: código endurecido + WAF ────────────────────
+  #    http://localhost:8092 -> WAF -> app-hardened
+  #    Ni el WAF deja pasar payloads ni, si pasara, el código los acepta.
+  waf-hardened:
+    image: owasp/modsecurity-crs:nginx
+    environment:
+      BACKEND: "http://app-hardened:80"
+      PORT: "8080"
+      SERVER_NAME: "lab.local"
+      MODSEC_RULE_ENGINE: "On"
+      PARANOIA: "1"
+    ports:
+      - "8092:8080"
+    depends_on: [app-hardened]
+    networks: [frontend]
+
+  # ── Lab legacy: CentOS 7 + PHP 5.4.16 ─────────────────────────────────────
+  #    docker compose --profile centos54 up -d --build
+  centos54:
+    build: ./centos54
+    ports:
+      - "8086:80"
+    volumes:
+      - ./php.ini:/etc/php.d/zz-php2shell.ini:ro
+    container_name: php2shell7-centos54
+    networks: [frontend, internal-net]
+    profiles: ["centos54"]
+
+  # WAF delante del lab CentOS 7 + PHP 5.4.16
+  # docker compose --profile centos54 up -d --build
+  # http://localhost:8093
+  waf-centos:
+    image: owasp/modsecurity-crs:nginx
+    environment:
+      BACKEND: "http://centos54:80"
+      PORT: "8080"
+      SERVER_NAME: "lab.local"
+      MODSEC_RULE_ENGINE: "On"
+      PARANOIA: "1"
+    ports:
+      - "8093:8080"
+    depends_on: [centos54]
+    networks: [frontend]
+    profiles: ["centos54"]
+
+  # ── G) Origen bloqueado: la app NO tiene puerto público; solo el WAF llega ─
+  #    http://localhost:8095 (unico camino hacia la app)
+  origin-locked:
+    build: .
+    container_name: php2shell7-origin-locked
+    networks: [origin-net]
+
+  waf-locked:
+    image: owasp/modsecurity-crs:nginx
+    environment:
+      BACKEND: "http://origin-locked:80"
+      PORT: "8080"
+      SERVER_NAME: "lab.local"
+      MODSEC_RULE_ENGINE: "On"
+      PARANOIA: "1"
+    ports:
+      - "8095:8080"
+    depends_on: [origin-locked]
+    networks: [frontend, origin-net]
+
+networks:
+  frontend:
+  internal-net:
+  origin-net:
