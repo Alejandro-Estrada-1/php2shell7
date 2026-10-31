@@ -247,7 +247,8 @@ python3 lfi_scan.py --target https://<host>/index.php --param option --authorize
 ```
 
 `--crawl` lee `href`, `src`, `action` y los `name=` de los formularios de la propia página
-y prueba esos parámetros primero. Y con `--param` la Fase 3 se ejecuta **aunque no haya
+y prueba esos parámetros primero. Ignora `<meta>`, recursos estáticos y enlaces externos
+(CDNs, Google Fonts), que solo generan ruido. Y con `--param` la Fase 3 se ejecuta **aunque no haya
 firma de error** (útil cuando `display_errors=Off`): si el `include` funciona, `php://filter`
 delata la lectura igualmente.
 

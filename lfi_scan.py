@@ -176,26 +176,53 @@ def detect_waf(target, timeout=8):
 
 
 LINK_RE = re.compile(r'(?:href|src|action)\s*=\s*["\']([^"\']+)["\']', re.I)
-INPUT_RE = re.compile(r'name\s*=\s*["\']([^"\']+)["\']', re.I)
+FORM_RE = re.compile(r"<(?:input|select|textarea|button)\b[^>]*>", re.I)
+NAME_ATTR_RE = re.compile(r'name\s*=\s*["\']([^"\']+)["\']', re.I)
 PARAM_NAME_RE = re.compile(r"[A-Za-z0-9_\-\[\]]{1,40}")
+STATIC_EXT = (".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
+              ".woff", ".woff2", ".ttf", ".map")
+
+
+def crawl_page(target, timeout=8):
+    """Devuelve (parametros, enlaces internos) vistos en la pagina.
+
+    Solo cuenta enlaces del mismo host (fuera Google Fonts, CDNs, etc.) y
+    nombres de campos de formulario reales (no <meta name="viewport">).
+    """
+    st, body, _, _ = fetch(target, timeout)
+    if st is None:
+        return [], []
+    text = body.decode(errors="replace")
+    base = urllib.parse.urlsplit(target)
+    params, links = [], []
+
+    for attr in LINK_RE.findall(text):
+        url = urllib.parse.urljoin(target, attr)
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme not in ("http", "https"):
+            continue
+        if parts.netloc and parts.netloc != base.netloc:
+            continue
+        path = parts.path or "/"
+        if path.lower().endswith(STATIC_EXT):
+            continue
+        if path not in links:
+            links.append(path)
+        for key, _ in urllib.parse.parse_qsl(parts.query, keep_blank_values=True):
+            if key and key not in params:
+                params.append(key)
+
+    for match in FORM_RE.finditer(text):
+        for key in NAME_ATTR_RE.findall(match.group(0)):
+            if key not in params:
+                params.append(key)
+
+    clean = [n for n in params if PARAM_NAME_RE.fullmatch(n)]
+    return clean, links
 
 
 def crawl_params(target, timeout=8):
-    """Saca nombres de parametro de los enlaces y formularios de la propia pagina."""
-    st, body, _, err = fetch(target, timeout)
-    if st is None:
-        return []
-    text = body.decode(errors="replace")
-    names = []
-    for attr in LINK_RE.findall(text):
-        query = urllib.parse.urlsplit(urllib.parse.urljoin(target, attr)).query
-        for key, _ in urllib.parse.parse_qsl(query, keep_blank_values=True):
-            if key and key not in names:
-                names.append(key)
-    for key in INPUT_RE.findall(text):
-        if key and key not in names:
-            names.append(key)
-    return [n for n in names if PARAM_NAME_RE.fullmatch(n)]
+    return crawl_page(target, timeout)[0]
 
 
 def check_probe(kind, body):
@@ -529,10 +556,11 @@ def run_scenario(target, param, session_paths, cmd, session_name, timeout, crawl
             result["waf"] = detect_waf(target, timeout)
             candidates = None
             if crawl:
-                found = crawl_params(target, timeout)
+                found, links = crawl_page(target, timeout)
                 candidates = found + [c for c in CANDIDATE_PARAMS if c not in found]
                 print(f"[*] Parametros encontrados en la pagina: "
                       f"{', '.join(found) or '(ninguno)'}")
+                print(f"[*] Enlaces internos: {', '.join(links[:15]) or '(ninguno)'}")
             found_param = scan(target, param, timeout, candidates)
             effective = found_param or param
             result["param"] = effective
@@ -708,9 +736,12 @@ def main():
     print()
     candidates = None
     if args.crawl:
-        found = crawl_params(args.target, args.timeout)
+        found, links = crawl_page(args.target, args.timeout)
         print(f"[*] Parametros encontrados en la pagina ({len(found)}): "
               f"{', '.join(found[:25]) or '(ninguno)'}")
+        if links:
+            print(f"[*] Enlaces internos ({len(links)}): "
+                  f"{', '.join(links[:15])}{' ...' if len(links) > 15 else ''}")
         print()
         candidates = found + [c for c in CANDIDATE_PARAMS if c not in found]
     param = scan(args.target, args.param, args.timeout, candidates)
