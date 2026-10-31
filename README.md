@@ -222,6 +222,7 @@ python3 lfi_scan.py                                  # lab por defecto (8083)
 python3 lfi_scan.py --param page                     # solo ese parámetro
 python3 lfi_scan.py --param page --chain --cmd "id"  # hasta RCE
 python3 lfi_scan.py --param page --chain --post      # RCE + impacto (solo lectura)
+python3 lfi_scan.py --crawl                          # saca parametros de los enlaces/formularios
 python3 lfi_scan.py --diff A E                       # tabla comparativa A vs E
 python3 lfi_scan.py --diff A E --diff-md informe.md  # la misma tabla en markdown
 python3 lfi_scan.py --target https://host --authorized  # objetivo no local con permiso
@@ -237,6 +238,18 @@ Fases:
 | 3 | Confirmación (`/etc/passwd`, traversal, `php://filter`, `data://`) |
 | 4 | Cadena `session.upload_progress` → RCE |
 | 5 | `--post`: comprobaciones de **solo lectura** del impacto |
+
+Si la Fase 2 no encuentra nada, el parámetro probablemente no está en la lista. Dos atajos:
+
+```bash
+python3 lfi_scan.py --target https://<host>/index.php --crawl      # nombres sacados del HTML real
+python3 lfi_scan.py --target https://<host>/index.php --param option --authorized
+```
+
+`--crawl` lee `href`, `src`, `action` y los `name=` de los formularios de la propia página
+y prueba esos parámetros primero. Y con `--param` la Fase 3 se ejecuta **aunque no haya
+firma de error** (útil cuando `display_errors=Off`): si el `include` funciona, `php://filter`
+delata la lectura igualmente.
 
 ### `--diff`: comparativa automática para el informe
 
