@@ -30,6 +30,7 @@ import contextlib
 import io
 import random
 import re
+import ssl
 import string
 import sys
 import time
@@ -69,6 +70,16 @@ SESSION_PATHS = [
 ]
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+# Contexto TLS opcional (--insecure, solo laboratorio)
+SSL_CTX = None
+
+
+def enable_insecure_tls():
+    global SSL_CTX
+    SSL_CTX = ssl.create_default_context()
+    SSL_CTX.check_hostname = False
+    SSL_CTX.verify_mode = ssl.CERT_NONE
 
 # Escenarios del laboratorio, para poder escribir --diff A E
 SCENARIOS = {
@@ -120,7 +131,7 @@ def fetch(url, timeout=8, data=None, headers=None):
     t = time.time()
     try:
         req = urllib.request.Request(url, data=data, headers=hdrs)
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as r:
             return r.status, r.read(), (time.time() - t) * 1000, None
     except urllib.error.HTTPError as e:
         try:
@@ -142,7 +153,7 @@ WAF_STATUS = {403, 406, 429, 501, 999}
 def fetch_headers(url, timeout=8):
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as r:
             return r.status, dict(r.headers)
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers)
@@ -257,6 +268,8 @@ def scan(target, param=None, timeout=8, candidates=None):
     st, body, ms, err = fetch(target, timeout)
     if st is None:
         print(f"[-] No se pudo conectar: {err}")
+        if err and "CERTIFICATE_VERIFY_FAILED" in err and SSL_CTX is None:
+            print("    Sugerencia: usa --insecure (o -k) si el certificado TLS es autofirmado o caducado.")
         sys.exit(1)
     base_len, base_txt = summarize(body)
     print_kv("baseline", f"HTTP {st} | {base_len} bytes | {int(ms)} ms")
@@ -678,6 +691,8 @@ def main():
     ap.add_argument("--param", help="probar solo este parametro (si no, lista de candidatos)")
     ap.add_argument("--authorized", action="store_true",
                     help="confirma que tienes permiso para probar un objetivo no local")
+    ap.add_argument("-k", "--insecure", action="store_true",
+                    help="no verificar certificados TLS (autofirmados o caducados)")
     ap.add_argument("--timeout", type=float, default=8)
     ap.add_argument("--chain", action="store_true", help="intentar la cadena hasta RCE")
     ap.add_argument("--post", action="store_true",
@@ -696,6 +711,9 @@ def main():
     ap.add_argument("--diff-log", action="store_true",
                     help="con --diff: muestra tambien la salida completa de cada objetivo")
     args = ap.parse_args()
+
+    if args.insecure:
+        enable_insecure_tls()
 
     for value in (args.diff or []):
         url, _ = resolve_target(value)
