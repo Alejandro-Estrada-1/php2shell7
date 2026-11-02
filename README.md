@@ -23,6 +23,7 @@ defensa detiene qué cosa.
 | **G** | `waf-locked` | http://localhost:8095 | Origen sin puerto público: solo el WAF llega |
 | — | `internal` | *(sin puerto)* | Servicio "interno" con un secreto falso, para el pivote |
 | — | `centos54` | http://localhost:8086 | Lab legacy CentOS 7 + PHP 5.4.16 (`--profile centos54`) |
+| — | `centos54-real` | http://localhost:8087 | Réplica de producción: `display_errors=Off`, sin `--param` no se detecta |
 | — | `waf-centos` | http://localhost:8093 | WAF delante del lab legacy (`--profile centos54`) |
 
 ```
@@ -211,6 +212,41 @@ Vectores que quedan abiertos incluso con el origen cerrado:
 Conclusión: cerrar el origen elimina el bypass **trivial**, pero un WAF es una capa
 más, no una frontera de confianza. El origen sigue siendo vulnerable; la cura es el código.
 
+### Paso H — El falso negativo (por qué “no detectado” no es “seguro”)
+
+`centos54-real` (8087) replica el caso que se ve en producción: una app real que
+renderiza 81 902 bytes de HTML e `include($_GET['page'])`, con el `php.ini` de fábrica
+de CentOS 7 (`display_errors = Off`).
+
+```bash
+# 1) Sin --param: las 32 sondas devuelven EXACTAMENTE los mismos 81902 bytes
+python3 lfi_scan.py --target http://localhost:8087/index.php
+# [-] No se detecto LFI con las sondas usadas (no significa que no exista).
+
+# 2) El fallo está en el log, no en el HTML
+docker exec php2shell7-centos54-real tail -3 /var/log/httpd/error_log
+# PHP Warning: include(/var/www/html/zz_..._nofile): failed to open stream
+
+# 3) Con el parámetro correcto, la Fase 3 se fuerza y confirma
+python3 lfi_scan.py --target http://localhost:8087/index.php --param page
+# [+] CONFIRMADO lectura /etc/passwd
+```
+
+Lección para el informe: un escáner que solo busca firmas de error **da negativo**
+con `display_errors=Off`. La ausencia de hallazgo no es prueba de seguridad.
+
+En este perfil la cadena a RCE **no** funciona, y el script lo explica en vez de
+culpar a la ruta:
+
+```
+[-] No se ejecuto el payload: la cadena esta cortada por configuracion.
+    session.upload_progress.cleanup = On (/etc/php.ini): el progreso se borra
+    antes de poder incluirlo. Hace falta cleanup = Off.
+```
+
+Es la diferencia con `centos54` (8086): allí el `php.ini` del lab pone `cleanup = Off`
+y la cadena sí llega a RCE. Dos configuraciones, dos resultados, mismo código vulnerable.
+
 ---
 
 ## Herramientas
@@ -225,8 +261,12 @@ python3 lfi_scan.py --param page --chain --post      # RCE + impacto (solo lectu
 python3 lfi_scan.py --crawl                          # saca parametros de los enlaces/formularios
 python3 lfi_scan.py --diff A E                       # tabla comparativa A vs E
 python3 lfi_scan.py --diff A E --diff-md informe.md  # la misma tabla en markdown
+python3 lfi_scan.py --target https://host -k --authorized  # certificado de laboratorio
 python3 lfi_scan.py --target https://host --authorized  # objetivo no local con permiso
 ```
+
+`-k` / `--insecure` desactiva la verificación del certificado TLS: solo para labs con
+certificado autofirmado o caducado, nunca contra producción.
 
 Fases:
 

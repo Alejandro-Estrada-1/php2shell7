@@ -107,6 +107,19 @@ services:
     networks: [frontend]
     profiles: ["centos54"]
 
+  # ── CentOS 7 + PHP 5.4.16 con php.ini de fábrica (display_errors=Off) ─────
+  #    Sin montar ./php.ini: reproduce por qué Fase 2 da negativo con sondas _nofile
+  #    http://localhost:8087
+  centos54-real:
+    build: ./centos54
+    ports:
+      - "8087:80"
+    volumes:
+      - ./centos54_real:/var/www/html:ro
+    container_name: php2shell7-centos54-real
+    networks: [frontend]
+    profiles: ["centos54"]
+
   # ── G) Origen bloqueado: la app NO tiene puerto público; solo el WAF llega ─
   #    http://localhost:8095 (unico camino hacia la app)
   origin-locked:
